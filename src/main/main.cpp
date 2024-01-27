@@ -1,9 +1,12 @@
-/**********************************************************************
-  项目名称/Project          : 电路控制开关
-  程序名称/Program name     : Control The Switch
-  团队/Team                : YGKJ
-  作者/Author              : YGKJ
-***********************************************************************/
+/***********************************************************************
+ * @file 	:	main.cpp
+ * @author	:	CH
+ * @brief	:
+ * @Copyright (C)  2024-01-30  .cdWFVCEL. all right reserved
+ ***********************************************************************/
+
+/* include ------------------------------------------------------------------------------------------------- */
+// #include "main.h"
 #include <ESP8266WiFi.h>
 #include <PubSubClient.h>
 #include <Ticker.h>
@@ -11,48 +14,98 @@
 #include <DNSServer.h>
 #include <ESP8266WebServer.h>
 #include <NTPClient.h>
+#include <ArduinoJson.h>
+#include <EEPROM.h>
+// #include <ModbusSlave.h>
+#include <iostream>
+/* macro definition ------------------------------------------------------------------------------------------------- */
+#define tp() Serial.printf("%s:%d\r\n", __FILE__, __LINE__)
 
-#define LED_PWR 9
+#define SOFT_VERSION "1.1"
+
+#define LED_RELAY_STAT 9
 #define LED_SIGNAL 10
-#define ON_LED_PWR 0
-#define OFF_LED_PWR 1
+#define ON_LED_RELAY 0
+#define OFF_LED_RELAY 1
 #define ON_LED_SIGNAL 0
 #define OFF_LED_SIGNAL 1
 
-String soft_version = "1.0";
+#define RELAY_GPIO 4
+#define KEY_GPIO 14
 
-WiFiUDP ntpUDP;
-NTPClient timeClient(ntpUDP, "pool.ntp.org");
-const char *mqttServer = "hcdda1ed.ala.cn-hangzhou.emqxsl.cn";
-const int SwitchGPIO = 16; // 继电器对应GPIO号
-const int brokerPort = 8883;
-// 需要修改的信息
-//  MQTT服务端连接用户名密码
-const char *mqttUserName = "dl2binary";
-const char *mqttPassword = "wocaonima88jqk";
-// const char *ssid = "303";
-// const char *password = "VT4009030242";
-const char *ssid = "CMCC-CL4X";
-const char *password = "ZQYJZ926294";
+#define SW_DELAY_ONOFF_MS (5000 * 60) // 5分钟
+#define MB_DATASIZE 1000              // modbus 1帧数据最大的字节数决定,扩展为1000字节(modbus默认仅支持255字节)
+/* type definition ------------------------------------------------------------------------------------------------- */
+class ModbusSlave;
+// class Paramer;
+typedef struct
+{
+  // uint8_t fsm = 0;
+  uint32_t ms_st = 0;
+  bool flag = false;
+} DelayOnOffFsm_t;
 
-String deviceNo; // 设备编号,与mac地址相同(不带冒号)
-String clientId; // 客户端ID,与mac地址相同(不带冒号)
+class Paramer
+{
+public:
+  String soft_version; // 程序中,程序对外的接口
+  String client_id;
+  String drive_no;
+  String ssid;
+  String password;
+  String mqtt_server;
+  uint16_t mqtt_port;
+  String mqtt_username;
+  String mqtt_password;
+  String group_ctrl_topic;
+  String group_stat_topic;
+  String pub_ctrl_topic;
+  String pub_stat_topic;
+  String ctrl_topic;
+  String stat_topic;
+  String modify_config_topic;
+  String read_config_topic;
+  Paramer();
+  void ResetParamToDefault();
+  void Load();
+  void Save();
+  void Print();
+  String GetParamsJsonStr();
+  // private:
+  StaticJsonDocument<MB_DATASIZE> jdoc; // 方便保存到EEPROM中
+};
 
-String publicControlTopic = "public_control"; // 公共控制主题,多路控制,在需要同时控制多个电闸时使用
-// String controlTopic = deviceNo + "/" + "contrl"; // 当前继电器控制主题
-// String statusTopic = deviceNo + "/" + "status";  // 当前继电器状态接收主题
-String controlTopic; // 当前继电器控制主题,由于需要修改,所以不在此处初始化
-String statusTopic;  // 当前继电器状态接收主题,由于需要修改,所以不在此处初始化
-// 需要修改的信息
-String cmd;
-String sw_on_cmd = "sw_on_cmd";                 // 打开电闸
-String sw_off_cmd = "sw_off_cmd";               // 关闭电闸
-String delay_sw_on_cmd = "delay_sw_on_cmd";     // 延时打开电闸
-String delay_sw_off_cmd = "delay_sw_off_cmd";   // 延时关闭电闸
-String get_sw_status_cmd = "get_sw_status_cmd"; // 查询电闸状态
+class ModbusSlave
+{
+public:
+  HardwareSerial &_serial;
+  uint8_t recv_buf[MB_DATASIZE + 10]; // 1帧数据最大的字节数决定
+  ModbusSlave(HardwareSerial &serial);
+  // @brief 计算 modbus crc16
+  uint16_t modbus_crc16(uint8_t *buf, uint16_t len);
+  void poll();
+};
 
-Ticker ticker;
+/* variable declaration ------------------------------------------------------------------------------------------------- */
+/* function declaration ------------------------------------------------------------------------------------------------- */
+void ConnWifi();
+uint8_t ConnMQTT_Server();
+void PublicKWStatMsg(const char *topic);
+void SubscribeTopic();
+void KeyInterrupt();
+void MqttRecv_cb(char *topic, byte *payload, uint16_t length);
+uint8_t ReadHoldReg_cb(uint8_t fc, uint16_t address, uint16_t length);
+uint8_t WriteHoldReg_cb(uint8_t fc, uint16_t address, uint16_t length);
+void LED_pool();
+void RelayOn();
+void RelayOff();
+/* variable definition ------------------------------------------------------------------------------------------------- */
+WiFiUDP NTP_UDP;
+NTPClient time_client(NTP_UDP, "pool.ntp.org");
+String sw_on_cmd = "sw_on_cmd", sw_off_cmd = "sw_off_cmd", delay_sw_on_cmd = "delay_sw_on_cmd", delay_sw_off_cmd = "delay_sw_off_cmd", get_sw_status_cmd = "get_sw_status_cmd";
 Ticker led_ticker;
+uint8_t g_tmp_buf[1024] = {0};
+ModbusSlave md_slave(Serial);
 static const char mqtt_ca_crt[] PROGMEM = R"EOF(
 -----BEGIN CERTIFICATE-----
 MIIDrzCCApegAwIBAgIQCDvgVpBCRrGhdWrJWZHHSjANBgkqhkiG9w0BAQUFADBh
@@ -78,306 +131,297 @@ CAUw7C29C79Fv1C5qfPrmAESrciIxpg0X40KPMbp1ZWVbd4=
 -----END CERTIFICATE-----
 )EOF";
 
-BearSSL::WiFiClientSecure wifiClient;
+BearSSL::WiFiClientSecure wifi_client;
 /* set SSL/TLS certificate */
 BearSSL::X509List mqttcert(mqtt_ca_crt);
-// WiFiClient wifiClient;
-PubSubClient mqttClient(wifiClient);
-
-int count; // Ticker计数用变量
-// 倒计时
-uint32_t startTime = 0;             // 定义一个变量来存储开始时间 计算锁门
-uint32_t delayTime = 5 * 60 * 1000; // 5分钟的延迟时间（以毫秒为单位）
-bool startCountdown = false;        // 布尔变量用于跟踪是否需要启动倒计时
-bool startLightCountdown = false;   // 设置为true，表示需要启动倒计时
-uint32_t startLightTime = 0;        // 定义一个变量来存储开始时间 计算关灯
-
-bool en_sigled_toggle = true; // 控制信号灯闪烁
-// uint32_t sigled_tog_led_cnt = 0;
-
-void connectWifi();
-void receiveCallback(char *topic, byte *payload, unsigned int length);
-void tickerCount();
-uint8_t connectMQTTServer();
-void pubMQTTmsg();
-void subscribeTopic();
-
-Ticker timer;
-void test();
+PubSubClient mqtt_client(wifi_client);
+bool is_conn_server = false;
+StaticJsonDocument<MB_DATASIZE> jdoc;
+Paramer paramer;
+DelayOnOffFsm_t delay_on_fsm, delay_off_fsm;
+/* function implementation ------------------------------------------------------------------------------------------------- */
 
 void setup()
 {
-  Serial.begin(9600);
-  pinMode(SwitchGPIO, OUTPUT);
-  // pinMode(LED_PWR, OUTPUT);
-  pinMode(LED_SIGNAL, OUTPUT);
+  Serial.begin(115200);
+  Serial.println("Power on..............");
+  // pinMode(RELAY_GPIO, OUTPUT);
+  // pinMode(LED_RELAY_STAT, OUTPUT);
+  // pinMode(LED_SIGNAL, OUTPUT);
+  // pinMode(KEY_GPIO, INPUT_PULLUP);
 
-  // 设置ESP8266工作模式为无线终端模式
-  WiFi.mode(WIFI_STA);
+  // attachInterrupt(digitalPinToInterrupt(KEY_GPIO), KeyInterrupt, FALLING);
+  // digitalWrite(RELAY_GPIO, HIGH);
+  // digitalWrite(LED_RELAY_STAT, ON_LED_RELAY), digitalWrite(LED_SIGNAL, ON_LED_SIGNAL);
 
-  digitalWrite(SwitchGPIO, HIGH);
-  digitalWrite(LED_PWR, ON_LED_PWR), digitalWrite(LED_SIGNAL, ON_LED_SIGNAL);
-  led_ticker.attach(0.5, // 联网过程中,LED闪烁提示
-                    []()
-                    {
-                      if (en_sigled_toggle)
-                      {
-                        digitalWrite(LED_SIGNAL, !digitalRead(LED_SIGNAL));
-                      }
-                    });
-  // 连接WiFi
-  connectWifi();
+  // led_ticker.attach_ms(500, LED_pool);
 
-  deviceNo = WiFi.macAddress();
-  deviceNo.replace(":", "");
-  clientId = deviceNo;
-  controlTopic = deviceNo + "/" + "contrl"; // 当前继电器控制主题
-  statusTopic = deviceNo + "/" + "status";  // 当前继电器状态接收主题
+  // Serial.println(WiFi.macAddress());
+  paramer.ResetParamToDefault();
+  paramer.Load();
+  paramer.Print();
 
-  // STEP4: Set MQTT Parameters
-  mqttClient.setClient(wifiClient);
-  // 设置MQTT服务器和端口号
-  mqttClient.setServer(mqttServer, brokerPort);
-  mqttClient.setCallback(receiveCallback);
+  WiFi.mode(WIFI_STA); // 设置ESP8266工作模式为无线终端模式
+  ConnWifi();          // 连接WiFi
 
-  // 连接MQTT服务器
-  uint8_t isconn = connectMQTTServer();
+  mqtt_client.setClient(wifi_client);
+  // Serial.printf("mqtt_server:%s \r\n",paramer.mqtt_server.c_str());
+  // Serial.printf("mqtt_port:%d \r\n",paramer.mqtt_server.c_str());
+  mqtt_client.setServer(paramer.mqtt_server.c_str(), paramer.mqtt_port);
+  mqtt_client.setCallback(MqttRecv_cb);
+  is_conn_server = ConnMQTT_Server(); // 连接MQTT服务器
 
-  if (isconn) // if connect to netword is ok
-  {
-    digitalWrite(LED_SIGNAL, ON_LED_SIGNAL);
-  }
-  else // if connect to netword is fail
-  {
-    digitalWrite(LED_SIGNAL, OFF_LED_SIGNAL);
-  }
-
-  led_ticker.detach();
-
-  // Ticker定时对象
-  ticker.attach(1, tickerCount);
-
-  timeClient.begin();
-  timeClient.update();
-
-  Serial.print("mqtt_server"), Serial.println(mqttServer);
-  Serial.print("mqtt_port"), Serial.println(brokerPort);
-  Serial.print("client_id:"), Serial.println(clientId);
-  Serial.print("device_no:"), Serial.println(deviceNo);
+  time_client.begin();
+  time_client.update();
 }
 
 void loop()
 {
-  // 如果需要启动倒计时且已经过了5分钟
-  if (startCountdown && millis() - startTime >= delayTime)
+  static uint32_t last_seconed = 0;
+
+  // if (delay_on_fsm.flag)
+  // { // relay delay on
+  //   if (millis() - delay_on_fsm.ms_st >= SW_DELAY_ONOFF_MS)
+  //   {
+  //     // digitalWrite(RELAY_GPIO, LOW);
+  //     RelayOn();
+  //     delay_on_fsm.flag = false;
+  //   }
+  // }
+  // if (delay_off_fsm.flag)
+  // { // relay delay off
+  //   if (millis() - delay_off_fsm.ms_st >= SW_DELAY_ONOFF_MS)
+  //   {
+  //     // digitalWrite(RELAY_GPIO, HIGH);
+  //     RelayOff();
+  //     delay_off_fsm.flag = false;
+  //   }
+  // }
+
+  if (mqtt_client.connected())
   {
-    digitalWrite(SwitchGPIO, HIGH); // 5分钟后触发的操作
-    startCountdown = false;         // 重置标志
-    startTime = 0;                  // 倒计时重置
-  }
-  if (startLightCountdown && millis() - startLightTime >= delayTime)
-  {
-    digitalWrite(SwitchGPIO, LOW); // 5分钟后触发的操作
-    startLightCountdown = false;   // 重置标志
-    startLightTime = 0;            // 倒计时重置
-  }
-  if (mqttClient.connected())
-  { // 如果开发板成功连接服务器
-    // Serial.println(millis());
-    // 每隔60秒钟发布一次信息
-    if (count >= 3600)
+    if (millis() / 1000 - last_seconed >= 60) // interval 60s send public message
     {
       Serial.println("public mqtt message");
-      pubMQTTmsg(); // 查询开关状态
-      count = 0;
+      // PublicKWStatMsg(paramer.pub_stat_topic.c_str());   // 查询开关状态;
+      PublicKWStatMsg(paramer.group_stat_topic.c_str()); // 查询开关状态;
+      PublicKWStatMsg(paramer.stat_topic.c_str());       // 查询开关状态;
+      last_seconed = millis() / 1000;
     }
-    // 保持心跳
-    mqttClient.loop();
+    mqtt_client.loop(); // keep mqtt alive
   }
   else
-  {                      // 如果开发板未能成功连接服务器
-    connectMQTTServer(); // 则尝试连接服务器
+  {                    // 如果开发板未能成功连接服务器
+    ConnMQTT_Server(); // 则尝试连接服务器
+  }
+
+  md_slave.poll();
+}
+
+/**
+ * @brief LED 控制
+ *        relay_stat_led: 继电器状态指示灯,继电器吸合时亮,断开时灭
+ *        signal_led: 信号灯,联网中闪烁提示,联网成功后常亮,联网失败后灭
+ */
+void LED_pool() // interval 500ms callback
+{
+  if (is_conn_server == false) // then connecting to server and signal led blink
+  {
+    // signal led blink
+    digitalRead(LED_SIGNAL) == ON_LED_SIGNAL ? digitalWrite(LED_SIGNAL, OFF_LED_SIGNAL) : digitalWrite(LED_SIGNAL, ON_LED_SIGNAL);
+  }
+  else // connected to server and signal led on
+  {
+    digitalWrite(LED_SIGNAL, ON_LED_SIGNAL);
+  }
+
+  // according to relay status to control relay stat led
+  if (digitalRead(RELAY_GPIO) == LOW)
+  {
+    digitalWrite(LED_RELAY_STAT, ON_LED_RELAY);
+  }
+  else
+  {
+    digitalWrite(LED_RELAY_STAT, OFF_LED_RELAY);
   }
 }
-
-void tickerCount()
-{
-  count++;
-}
-
 /**
  * @brief
  *
  * @return uint8_t 1:成功连接服务器 0:未能成功连接服务器
-
  */
-uint8_t connectMQTTServer()
+uint8_t ConnMQTT_Server()
 {
   // 根据ESP8266的MAC地址生成客户端ID（避免与其它ESP8266的客户端ID重名）
   // 连接MQTT服务器
-  if (mqttClient.connect(clientId.c_str(), mqttUserName, mqttPassword))
+  // Serial.println(paramer.client_id.c_str());
+  // Serial.println(paramer.mqtt_username.c_str());
+  // Serial.println(paramer.mqtt_password.c_str());
+  if (mqtt_client.connect(paramer.client_id.c_str(), paramer.mqtt_username.c_str(), paramer.mqtt_password.c_str()))
   {
     Serial.println("MQTT Server Connected Successful.");
     // 订阅主题
-    subscribeTopic();
+    SubscribeTopic();
     return 1;
   }
   else
   {
     Serial.print("MQTT Server Connect Failed. Client State:");
-    Serial.println(mqttClient.state());
+    Serial.println(mqtt_client.state());
     return 0;
   }
 }
 
 // 发布继电器状态返回信息
-void pubMQTTmsg()
+void PublicKWStatMsg(const char *topic)
 {
-  String topicString = statusTopic;
-  char publishTopic[topicString.length() + 1];
-  strcpy(publishTopic, topicString.c_str());
-  // String messageString = "{\"clientId\": " +"\""+ clientId+"\"";
-  String clientHead = "{\"clientId\": ";
-  String TimeHead = ",\"timestamp\": ";
-  String slash = "\"";
-  timeClient.update();
-  uint32_t currentTime = timeClient.getEpochTime();
-  String messageString = clientHead + slash + clientId + slash + TimeHead + currentTime;
-  Serial.println("messageString: " + messageString);
-  // 建立发布信息。
-  messageString += ",\"Switch1Status\":" + String(digitalRead(SwitchGPIO)) + "}";
-  // String messageString = "{\"clientId: " + String(clientId) + ",Switch1Status: " + String(GPIOStatus1) + ",Switch2Status: " + String(GPIOStatus2) + "}";
-
-  char publishMsg[messageString.length() + 1];
-  strcpy(publishMsg, messageString.c_str());
-
-  // 实现ESP8266向主题发布信息
-  if (mqttClient.publish(publishTopic, publishMsg))
-  {
-    Serial.println("Publish Topic:");
-    Serial.println(publishTopic);
-    Serial.println("Publish message:");
-    Serial.println(publishMsg);
-  }
-  else
-  {
-    Serial.println("Message Publish Failed.");
-  }
+  String payload;
+  jdoc["drive_no"] = paramer.drive_no;
+  jdoc["timestamp"] = time_client.update(),
+  time_client.getEpochTime();
+  jdoc["sw_stat"] = digitalRead(RELAY_GPIO);
+  serializeJson(jdoc, payload);
+  bool isok = mqtt_client.publish(topic, payload.c_str());
+  isok ? Serial.println("stat_topic publish ok") : Serial.println("stat_topic publish fail");
 }
+
 // 收到信息后的回调函数
-void receiveCallback(char *topic, byte *payload, unsigned int length)
+void MqttRecv_cb(char *topic, byte *payload, uint16_t length)
 {
-  cmd = "";
-  Serial.print("Message Received [");
-  Serial.print(topic);
-  Serial.print("] ");
-  for (int i = 0; i < length; i++)
+  DeserializationError err = deserializeJson(jdoc, topic);
+  if (err)
   {
-    cmd += (char)payload[i];
+    Serial.print(F("deserializeJson() failed: "));
+    Serial.println(err.f_str());
+    return;
   }
-  Serial.println("end ");
-  Serial.print(cmd);
-  Serial.println(" end");
-  if (String(topic) == controlTopic)
+  String cmd = String(jdoc["cmd"]);
+
+  if (String(topic) == paramer.ctrl_topic)
   {
-    Serial.println("String(topic) == controlTopic");
+    Serial.println("String(topic) == ctrl_topic");
     if (cmd == sw_on_cmd) // 打开继电器命令
     {
       Serial.println("改为低电平，继电器通路");
-      digitalWrite(SwitchGPIO, LOW); // 低电平，继电器则开
+      digitalWrite(RELAY_GPIO, LOW); // 低电平，继电器则开
     }
     if (cmd == sw_off_cmd) // 关闭继电器命令
     {
       Serial.println("改为高电平，继电器断路");
-      digitalWrite(SwitchGPIO, HIGH); // 高电平，继电器则关
+      digitalWrite(RELAY_GPIO, HIGH); // 高电平，继电器则关
     }
     if (cmd == delay_sw_off_cmd) // 延时关闭继电器命令
     {
       Serial.println("改为高电平，继电器断路");
-      digitalWrite(SwitchGPIO, LOW); // 低电平，继电器断开
-      startCountdown = true;         // 设置为true，表示需要启动倒计时
-      startTime = millis();          // 记录开始时间
+      digitalWrite(RELAY_GPIO, LOW); // 低电平，继电器断开
+      delay_off_fsm.flag = true;
+      delay_off_fsm.ms_st = millis();
     }
     if (cmd == delay_sw_on_cmd) // 延时打开继电器命令
     {
       Serial.println("改为高电平，继电器断路");
-      //      digitalWrite(SwitchGPIO, HIGH); // 低电平，继电器断开
-      startLightCountdown = true; // 设置为true，表示需要启动倒计时
-      startLightTime = millis();  // 记录开始时间
+      //      digitalWrite(RELAY_GPIO, HIGH); // 低电平，继电器断开
+      delay_on_fsm.flag = true;
+      delay_on_fsm.ms_st = millis();
     }
     if (cmd == get_sw_status_cmd)
     {
       Serial.println("收到单个查询指令，发送开关状态");
-      pubMQTTmsg(); // 查询开关状态
+      PublicKWStatMsg(paramer.ctrl_topic.c_str()); // 查询开关状态
     }
   }
-  if (String(topic) == publicControlTopic)
+  if (String(topic) == paramer.pub_ctrl_topic)
   {
     if (cmd == get_sw_status_cmd)
     {
       Serial.println("收到总查询指令，发送开关状态");
-      pubMQTTmsg(); // 查询开关状态
+      PublicKWStatMsg(paramer.pub_stat_topic.c_str()); // 查询开关状态
     }
     if (cmd == sw_on_cmd)
     { // 开启继电器
       Serial.println("所有改为低电平，继电器通路");
-      digitalWrite(SwitchGPIO, LOW);
+      digitalWrite(RELAY_GPIO, LOW);
     }
     if (cmd == sw_off_cmd)
     { // 关闭继电器
-
       Serial.println("所有改为高电平，继电器断路");
-      digitalWrite(SwitchGPIO, HIGH);
+      digitalWrite(RELAY_GPIO, HIGH);
     }
+  }
+  if (String(topic) == paramer.group_ctrl_topic)
+  {
+    if (cmd == get_sw_status_cmd)
+    {
+      Serial.println("收到总查询指令，发送开关状态");
+      PublicKWStatMsg(paramer.group_stat_topic.c_str()); // 查询开关状态
+    }
+    if (cmd == sw_on_cmd)
+    { // 开启继电器
+      Serial.println("所有改为低电平，继电器通路");
+      digitalWrite(RELAY_GPIO, LOW);
+    }
+    if (cmd == sw_off_cmd)
+    { // 关闭继电器
+      Serial.println("所有改为高电平，继电器断路");
+      digitalWrite(RELAY_GPIO, HIGH);
+    }
+  }
+  if (String(topic) == paramer.read_config_topic)
+  {
+    String payload;
+    jdoc["soft_version"] = paramer.soft_version;
+    jdoc["ssid"] = paramer.ssid;
+    jdoc["password"] = paramer.password;
+    jdoc["mqtt_server"] = paramer.mqtt_server;
+    jdoc["mqtt_port"] = paramer.mqtt_port;
+    jdoc["group_ctrl_topic"] = paramer.group_ctrl_topic;
+    serializeJson(jdoc, payload);
+    bool isok = mqtt_client.publish(paramer.read_config_topic.c_str(), payload.c_str());
+    isok ? Serial.println("read_config_topic publish ok") : Serial.println("read_config_topic publish fail");
+  }
+  if (String(topic) == paramer.modify_config_topic)
+  {
+    if (jdoc["ssid"].as<String>() != "")
+      paramer.ssid = jdoc["ssid"].as<String>();
+    if (jdoc["password"].as<String>() != "")
+      paramer.password = jdoc["password"].as<String>();
+    if (jdoc["mqtt_server"].as<String>() != "")
+      paramer.mqtt_server = jdoc["mqtt_server"].as<String>();
+    if (jdoc["mqtt_port"].as<String>() != "")
+      paramer.mqtt_port = jdoc["mqtt_port"].as<uint16_t>();
+    if (jdoc["group_ctrl_topic"].as<String>() != "")
+      paramer.group_ctrl_topic = jdoc["group_ctrl_topic"].as<String>();
+
+    paramer.Save();
   }
 }
 // 订阅指定主题
-void subscribeTopic()
+void SubscribeTopic()
 {
-  // 建立订阅独立主题
-  // c change s status 改变状态
-  String topicString = controlTopic;
-  char subTopic[topicString.length() + 1];
-  strcpy(subTopic, topicString.c_str());
-  // 通过串口监视器输出是否成功订阅独立主题
-  if (mqttClient.subscribe(subTopic))
-  {
-    Serial.print("Successful Subscribe Individual Topic:"), Serial.println(subTopic);
-  }
-  else
-  {
-    Serial.println("Individual Subscribe Fail...");
-  }
-
-  // 建立订阅总控制主题
-  if (mqttClient.subscribe(publicControlTopic.c_str()))
-  {
-    Serial.print("Successful Subscribe Individual Topic:"), Serial.println(publicControlTopic);
-  }
-  else
-  {
-    Serial.println("publicControlTopic Fail...");
-  }
-
-  if (mqttClient.subscribe(statusTopic.c_str()))
-  {
-    Serial.print("Successful Subscribe Individual Topic:"), Serial.println(statusTopic);
-  }
-  else
-  {
-    Serial.println("statusTopic Fail...");
-  }
+  String topic = paramer.pub_ctrl_topic;
+  mqtt_client.subscribe(topic.c_str()) ? Serial.println("subscribe " + topic + "is ok") : Serial.println("subsribe " + topic + "is fail");
+  topic = paramer.ctrl_topic;
+  mqtt_client.subscribe(topic.c_str()) ? Serial.println("subscribe " + topic + "is ok") : Serial.println("subsribe " + topic + "is fail");
+  topic = paramer.stat_topic;
+  mqtt_client.subscribe(topic.c_str()) ? Serial.println("subscribe " + topic + "is ok") : Serial.println("subsribe " + topic + "is fail");
+  topic = paramer.group_ctrl_topic;
+  mqtt_client.subscribe(topic.c_str()) ? Serial.println("subscribe " + topic + "is ok") : Serial.println("subsribe " + topic + "is fail");
+  topic = paramer.modify_config_topic;
+  mqtt_client.subscribe(topic.c_str()) ? Serial.println("subscribe " + topic + "is ok") : Serial.println("subsribe " + topic + "is fail");
+  topic = paramer.read_config_topic;
+  mqtt_client.subscribe(topic.c_str()) ? Serial.println("subscribe " + topic + "is ok") : Serial.println("subsribe " + topic + "is fail");
 }
 
 // ESP8266连接wifi
-void connectWifi()
+void ConnWifi()
 {
   // 设置重连超时时间和尝试次数
   WiFi.setAutoReconnect(true);        // 启用自动重新连接
   WiFi.setSleepMode(WIFI_NONE_SLEEP); // 设置睡眠模式（在连接失败时保持唤醒）
   WiFi.persistent(true);              // 持久化配置（使重启后仍能记住WiFi配置）
 
-  WiFi.begin(ssid, password);
+  WiFi.begin(paramer.ssid, paramer.password);
+
   // 等待WiFi连接,成功连接后输出成功信息
   while (WiFi.status() != WL_CONNECTED)
   {
@@ -391,7 +435,378 @@ void connectWifi()
   // STEP3: Set CA Certification for TLS
   Serial.print("MAC address:\t");
   Serial.println(WiFi.macAddress());
-  wifiClient.setTrustAnchors(&mqttcert);
+  wifi_client.setTrustAnchors(&mqttcert);
   // if no check the CA Certification
-  wifiClient.setInsecure();
+  wifi_client.setInsecure();
 }
+
+void KeyInterrupt()
+{
+  uint32_t start_st = millis();
+  while (!digitalRead(KEY_GPIO)) // wait for key release
+  {
+    if (millis() - start_st > 3000) // todo 阻塞时间过长,是否有可能导致看门狗重启,待确定
+    {
+      Serial.println("按键按下超过3秒，恢复出厂设置");
+      paramer.ResetParamToDefault();
+      paramer.Save();
+      ESP.restart();
+    }
+    else
+    {
+      // reverse kw status
+      digitalWrite(RELAY_GPIO, !digitalRead(RELAY_GPIO));
+      Serial.println("按键按下，反转开关状态");
+    }
+  }
+}
+
+void RelayOn()
+{
+  digitalWrite(RELAY_GPIO, LOW);
+}
+
+void RelayOff()
+{
+  digitalWrite(RELAY_GPIO, HIGH);
+}
+
+// Paramer class implement -------------------------------------------------------------------------------------------------
+Paramer::Paramer()
+{
+  // 构造函数的实现
+}
+void Paramer::ResetParamToDefault()
+{
+  jdoc["soft_version"] = SOFT_VERSION;
+  String mac_addr = WiFi.macAddress();
+  mac_addr.replace(":", "");
+  jdoc["drive_no"] = mac_addr.c_str();
+  jdoc["client_id"] = mac_addr.c_str();
+  jdoc["ssid"] = "88888888";
+  jdoc["password"] = "88888888";
+  jdoc["mqtt_server"] = "hcdda1ed.ala.cn-hangzhou.emqxsl.cn";
+  jdoc["mqtt_port"] = 8883;
+  jdoc["mqtt_username"] = "dl2binary";
+  jdoc["mqtt_password"] = "wocaonima88jqk";
+  jdoc["group_ctrl_topic"] = "group_control";
+  jdoc["group_stat_topic"] = "group_status";
+  jdoc["pub_ctrl_topic"] = "public_control";
+  jdoc["pub_stat_topic"] = "public_status";
+  jdoc["ctrl_topic"] = jdoc["drive_no"].as<String>() + "/" + "contrl";
+  jdoc["stat_topic"] = jdoc["drive_no"].as<String>() + "/" + "status";
+  jdoc["modify_config_topic"] = "config_modify";
+  jdoc["read_config_topic"] = "read_config";
+
+  soft_version = SOFT_VERSION;
+  drive_no = jdoc["drive_no"].as<String>();
+  client_id = jdoc["client_id"].as<String>();
+  ssid = jdoc["ssid"].as<String>();
+  password = jdoc["password"].as<String>();
+  mqtt_server = jdoc["mqtt_server"].as<String>();
+  mqtt_port = jdoc["mqtt_port"].as<uint16_t>();
+  mqtt_username = jdoc["mqtt_username"].as<String>();
+  mqtt_password = jdoc["mqtt_password"].as<String>();
+  group_ctrl_topic = jdoc["group_ctrl_topic"].as<String>();
+  group_stat_topic = jdoc["group_stat_topic"].as<String>();
+  pub_ctrl_topic = jdoc["pub_ctrl_topic"].as<String>();
+  pub_stat_topic = jdoc["pub_stat_topic"].as<String>();
+  ctrl_topic = jdoc["ctrl_topic"].as<String>();
+  stat_topic = jdoc["stat_topic"].as<String>();
+  modify_config_topic = jdoc["modify_config_topic"].as<String>();
+  read_config_topic = jdoc["read_config_topic"].as<String>();
+
+  Save();
+}
+
+void Paramer::Load()
+{
+  EEPROM.begin(MB_DATASIZE);
+  // uint16_t datalen = 0;
+  // datalen = EEPROM.get(0, datalen);
+  uint16_t datalen = EEPROM.read(0) << 8 | EEPROM.read(1);
+  // Serial.printf("datalen:%d\r\n", datalen);
+  if (datalen == 0xffff) // first time run
+  {
+    Serial.println("no data in eeprom");
+    ResetParamToDefault();
+    // Save();
+  }
+  else if (datalen > MB_DATASIZE)
+  {
+    Serial.println("eeprom data error,reset to default");
+    ResetParamToDefault();
+    // Save();
+  }
+  else
+  {
+    uint8_t data[datalen];
+    memset(data, 0, sizeof(data));
+    for (int i = 0; i < datalen; i++)
+      data[i] = EEPROM.read(i + 2);
+
+    DeserializationError err = deserializeJson(jdoc, data);
+    if (err)
+    {
+      Serial.print(F("deserializeJson() failed: "));
+      Serial.println(err.f_str());
+      ResetParamToDefault();
+      // Save();
+    }
+    else
+    {
+      // tp();
+      drive_no = jdoc["drive_no"].as<String>();
+      ssid = jdoc["ssid"].as<String>();
+      password = jdoc["password"].as<String>();
+      mqtt_server = jdoc["mqtt_server"].as<String>();
+      mqtt_port = jdoc["mqtt_port"].as<uint16_t>();
+      mqtt_username = jdoc["mqtt_username"].as<String>();
+      mqtt_password = jdoc["mqtt_password"].as<String>();
+      group_ctrl_topic = jdoc["group_ctrl_topic"].as<String>();
+      pub_ctrl_topic = jdoc["pub_ctrl_topic"].as<String>();
+      ctrl_topic = jdoc["ctrl_topic"].as<String>();
+      stat_topic = jdoc["stat_topic"].as<String>();
+      modify_config_topic = jdoc["modify_config_topic"].as<String>();
+      read_config_topic = jdoc["read_config_topic"].as<String>();
+    }
+  }
+  EEPROM.end();
+}
+
+void Paramer::Save()
+{
+  EEPROM.begin(MB_DATASIZE);
+
+  jdoc["soft_version"] = soft_version;
+  jdoc["drive_no"] = drive_no;
+  jdoc["client_id"] = client_id;
+  jdoc["ssid"] = ssid;
+  jdoc["password"] = password;
+  jdoc["mqtt_server"] = mqtt_server;
+  jdoc["mqtt_port"] = mqtt_port;
+  jdoc["mqtt_username"] = mqtt_username;
+  jdoc["mqtt_password"] = mqtt_password;
+  jdoc["group_ctrl_topic"] = group_ctrl_topic;
+  jdoc["pub_ctrl_topic"] = pub_ctrl_topic;
+  jdoc["ctrl_topic"] = ctrl_topic;
+  jdoc["stat_topic"] = stat_topic;
+  jdoc["modify_config_topic"] = modify_config_topic;
+  jdoc["read_config_topic"] = read_config_topic;
+
+  // 将 doc 转换成字符串
+  String json_str;
+  serializeJson(jdoc, json_str);
+  uint16_t datalen = json_str.length() + 1;
+  // Serial.printf("datalen:%d\r\n", datalen);
+  EEPROM.write(0, (datalen >> 8) & 0x00ff), EEPROM.write(1, datalen & 0x00ff); // the first two bytes is the length of data
+  for (int i = 0; i < datalen; i++)
+  {
+    EEPROM.write(i + 2, json_str[i]);
+  }
+  EEPROM.commit();
+  EEPROM.end();
+}
+
+void Paramer::Print()
+{
+  String jstr;
+  serializeJson(jdoc, jstr);
+  Serial.println(jstr);
+}
+
+String Paramer::GetParamsJsonStr()
+{
+  String jstr;
+  serializeJson(jdoc, jstr);
+  return jstr;
+}
+
+// modbus class implement -------------------------------------------------------------------------------------------------
+
+ModbusSlave::ModbusSlave(HardwareSerial &serial) : _serial(serial)
+{
+  // 构造函数的实现
+  _serial.setTimeout(200);
+}
+
+// @brief 计算 modbus crc16 (LSB)
+uint16_t ModbusSlave::modbus_crc16(uint8_t *buf, uint16_t len)
+{
+  uint16_t crc = 0xFFFF;
+  for (uint16_t pos = 0; pos < len; pos++)
+  {
+    crc ^= (uint16_t)buf[pos]; // XOR byte into least sig. byte of crc
+
+    for (int i = 8; i != 0; i--)
+    { // Loop over each bit
+      if ((crc & 0x0001) != 0)
+      {            // If the LSB is set
+        crc >>= 1; // Shift right and XOR 0xA001
+        crc ^= 0xA001;
+      }
+      else         // Else LSB is not set
+        crc >>= 1; // Just shift right
+    }
+  }
+  // Note, this number has low and high bytes swapped, so use it accordingly (or swap bytes)
+  return crc;
+}
+
+void ModbusSlave::poll()
+{
+  if (_serial.available())
+  {
+    uint16_t cnt = _serial.readBytes(recv_buf, sizeof(recv_buf)); // get a data frame
+    // for (int i = 0; i < cnt; i++)
+    //   Serial.printf("%02x ", recv_buf[i]);
+
+    uint8_t addr = recv_buf[0];
+    uint8_t fcode = recv_buf[1];
+
+    if (addr == 0x01 && fcode == 0x03) // read mutimul register
+    {
+      { // 接收数据解析
+        // 接收数据格式
+        // 设备地址（1字节）：表示请求的设备的地址。
+        // 功能码（1字节）：表示执行的功能，对于0x03功能码的请求，这个值应该是0x03。
+        // 起始地址（2字节）：表示要读取的第一个寄存器的地址，按照Big-Endian（高字节在前）的顺序存储。
+        // 寄存器数量（2字节）：表示要读取的寄存器的数量，按照Big-Endian的顺序存储。
+        // CRC校验（2字节）：表示前面所有字节的CRC校验值，按照Little-Endian（低字节在前）的顺序存储。
+        uint16_t start_ret = recv_buf[2] << 8 | recv_buf[3];
+        uint8_t reg_cnt = recv_buf[4] << 8 | recv_buf[5];
+        uint16_t recv_crc = recv_buf[6] << 8 | recv_buf[7];
+
+        uint16_t calc_crc = modbus_crc16(recv_buf, 6);
+
+        if (recv_crc != calc_crc)
+        {
+          Serial.printf("recv_crc:%04x, calc_crc:%04x\r\n", recv_crc, calc_crc);
+          goto error;
+        }
+      }
+
+      { // 响应数据
+        // paramer.Load();
+        String jstr = paramer.GetParamsJsonStr();
+
+        // 响应报文格式
+        // 设备地址（1字节）：表示响应的设备的地址
+        // 功能码（1字节）：表示执行的功能，对于03功能码的应答，这个值应该是03。
+        // 字节计数（2字节）：表示接下来的数据字节的数量。扩展为2字节,标准modbus协议为1字节
+        // 数据（n字节）：表示读取的寄存器的值，每个寄存器的值占2字节，按照Big-Endian（高字节在前）的顺序存储。
+        // CRC校验（2字节）：表示前面所有字节的CRC校验值，按照Little-Endian（低字节在前）的顺序存储。
+
+        uint8_t addr = 0x01;
+        uint8_t fcode = 0x03;
+        uint16_t byte_size = MB_DATASIZE;
+
+        uint16_t idx = 0;
+        memset(g_tmp_buf, 0, sizeof(g_tmp_buf));
+        g_tmp_buf[idx++] = addr, g_tmp_buf[idx++] = fcode, g_tmp_buf[idx++] = (byte_size >> 8) & 0x00ff, g_tmp_buf[idx++] = byte_size;
+        memcpy(&g_tmp_buf[idx], jstr.c_str(), jstr.length()), idx += jstr.length();
+        uint16_t crc = modbus_crc16(g_tmp_buf, idx);
+        g_tmp_buf[idx++] = crc, g_tmp_buf[idx++] = crc >> 8;
+
+        _serial.write(g_tmp_buf, MB_DATASIZE);
+      }
+    }
+    else if (addr == 0x01 && fcode == 0x10) // write mutimul register
+    {
+      // tp();
+      { // 接收数据
+        // 接收数据格式
+        // 设备地址（1字节）：表示请求的设备的地址。
+        // 功能码（1字节）：表示执行的功能，对于0x10功能码的请求，这个值应该是0x10。
+        // 起始地址（2字节）：表示要写入的第一个寄存器的地址，按照Big-Endian（高字节在前）的顺序存储。
+        // 寄存器数量（2字节）：表示要写入的寄存器的数量，按照Big-Endian的顺序存储。
+        // 字节计数（2字节）：表示接下来的数据字节的数量。扩展为2字节,标准modbus协议为1字节
+        // 数据（n字节）：表示要写入的寄存器的值，每个寄存器的值占2字节，按照Big-Endian的顺序存储。
+        // CRC校验（2字节）：表示前面所有字节的CRC校验值，按照Little-Endian（低字节在前）的顺序存储。
+
+        // 接收数据解析
+        uint16_t start_ret = recv_buf[2] << 8 | recv_buf[3];
+        uint8_t reg_cnt = recv_buf[4] << 8 | recv_buf[5];
+        uint16_t byte_cnt = recv_buf[6] << 8 | recv_buf[7];
+
+        uint16_t recv_crc = recv_buf[8 + byte_cnt] << 8 | recv_buf[8 + byte_cnt + 1];
+
+        uint16_t calc_crc = modbus_crc16(recv_buf, 1 + 1 + 2 + 2 + 2 + byte_cnt);
+
+        if (recv_crc != calc_crc)
+        {
+          Serial.printf("recv_crc:%04x, calc_crc:%04x\r\n", recv_crc, calc_crc);
+          goto error;
+        }
+      }
+      { // 写数据
+
+        uint8_t *payload = recv_buf + 8;
+        uint8_t len = recv_buf[6];
+
+        DeserializationError err = deserializeJson(jdoc, payload);
+        if (err)
+        {
+          Serial.print(F("deserializeJson() failed: "));
+          Serial.println(err.f_str());
+          goto error;
+        }
+
+        if (jdoc["ssid"].as<String>() != "")
+          paramer.ssid = jdoc["ssid"].as<String>();
+        if (jdoc["password"].as<String>() != "")
+          paramer.password = jdoc["password"].as<String>();
+        if (jdoc["mqtt_server"].as<String>() != "")
+          paramer.mqtt_server = jdoc["mqtt_server"].as<String>();
+        if (jdoc["mqtt_port"].as<String>() != "")
+          paramer.mqtt_port = jdoc["mqtt_port"].as<uint16_t>();
+        if (jdoc["group_ctrl_topic"].as<String>() != "")
+          paramer.group_ctrl_topic = jdoc["group_ctrl_topic"].as<String>();
+
+        paramer.Save();
+        // paramer.Print();
+      }
+      { // 响应报文
+        // 设备地址（1字节）：表示响应的设备的地址。
+        // 功能码（1字节）：表示执行的功能，对于0x10功能码的响应，这个值应该是0x10。
+        // 起始地址（2字节）：表示写入的第一个寄存器的地址，按照Big-Endian（高字节在前）的顺序存储。
+        // 寄存器数量（2字节）：表示写入的寄存器的数量，按照Big-Endian的顺序存储。
+        // CRC校验（2字节）：表示前面所有字节的CRC校验值，按照Little-Endian（低字节在前）的顺序存储
+
+        memset(g_tmp_buf, 0, sizeof(g_tmp_buf));
+        // g_tmp_buf[0] = 0x01, g_tmp_buf[1] = 0x10, g_tmp_buf[2] = 0x0, g_tmp_buf[3] = 0x0;
+        uint8_t addr = 0x01, fcode = 0x10, start_ret = 0x0, reg_cnt = 127;
+        g_tmp_buf[0] = addr, g_tmp_buf[1] = fcode, g_tmp_buf[2] = (start_ret >> 8), g_tmp_buf[3] = start_ret, g_tmp_buf[4] = (reg_cnt >> 8), g_tmp_buf[5] = reg_cnt;
+        uint16_t crc = modbus_crc16(g_tmp_buf, 6);
+        g_tmp_buf[6] = crc, g_tmp_buf[7] = crc >> 8;
+        // for (int i = 0; i < 8; i++)
+        //   Serial.printf("%02x ", g_tmp_buf[i]);
+        _serial.write(g_tmp_buf, 8);
+      }
+    }
+    else // error, 解析报文失败,响应失败报文
+    {
+    error:
+      tp();
+      // 设备地址（1字节）：表示响应的设备的地址。
+      // 功能码（1字节）：表示执行的功能，这个值应该是原请求的功能码 + 0x80。例如，如果请求的功能码是0x03，那么异常响应的功能码应该是0x83。
+      // 异常码（1字节）：表示异常的类型。常见的异常码有：
+      // 0x01：非法功能码，表示请求的功能码设备不支持。
+      // 0x02：非法数据地址，表示请求的数据地址不存在。
+      // 0x03：非法数据值，表示请求的数据值不合法。
+      // 0x04：设备故障，表示设备在处理请求时发生了故障。
+      // CRC校验（2字节）：表示前面所有字节的CRC校验值，按照Little-Endian（低字节在前）的顺序存储。
+      uint8_t addr = 0x01;                          // 设备地址
+      uint8_t _fcode = fcode | 0x80;                // 功能码
+      uint8_t excode = 0x04;                        // 异常码，非法数据地址
+      uint8_t buf[5] = {addr, fcode, excode, 0, 0}; // 初始化缓冲区
+      uint16_t crc = modbus_crc16(buf, 3);          // 计算CRC校验值
+      buf[3] = crc;                                 // 存储CRC校验值的低字节
+      buf[4] = crc >> 8;                            // 存储CRC校验值的高字节
+    }
+  }
+
+  return;
+}
+
+// main.cpp
